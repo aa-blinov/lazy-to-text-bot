@@ -5,10 +5,10 @@ numpy==2.5.4
 soundfile==0.14.0
 
 # Очередь, Telegram и база.
-huey==3.5.3
+huey==3.5.4
 redis==8.1.0
 python-telegram-bot==22.8
-psycopg[binary]==3.3.6
+psycopg[binary]==3.3.8
 psycopg-pool==3.3.3
 
 # Прочее.
