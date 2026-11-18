@@ -32,14 +32,15 @@ jobs:
           python-version: '3.12'
 
       - name: Install
+        # Mirrors the Dockerfile; the tests import numpy for the ASR helpers.
         run: |
           python3 -m pip install --upgrade pip
-          # pip install -e '.[dev]'
+          python3 -m pip install --no-cache-dir -r requirements.txt
 
       - name: Test
-        # run: python3 -m pytest -q
-        run: echo "Replace with the test command for this stack."
+        run: python3 -m unittest discover -s tests -t .
 
       - name: Build
-        # run: python3 -m build
-        run: echo "Replace with the build command for this stack."
+        # No wheel to build: the real build is the Docker image. Byte-compile
+        # the sources as the closest quick check.
+        run: python3 -m compileall -q app scripts

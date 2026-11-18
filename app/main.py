@@ -28,17 +28,32 @@ def main() -> int:
 
     os.makedirs(settings.data_dir, exist_ok=True)
     # Файл готовности от прошлого запуска мог пережить `docker compose
-    # restart` внутри того же контейнера. Убираем его до проверки базы,
-    # иначе healthcheck покажет healthy при упавшем Postgres.
+    # restart` внутри того же контейнера. Убираем его: пока база не
+    # поднялась, healthcheck не должен показывать healthy.
     Path(READY_FILE).unlink(missing_ok=True)
-    database.init_db(settings.database_url, settings.admin_ids)
-    if not settings.admin_ids and not database.has_admins(settings.database_url):
-        logger.warning(
-            "ADMIN_ID не задан: администратором станет первый, кто напишет /start. "
-            "Укажи ADMIN_ID в .env, чтобы закрепить админа."
-        )
 
-    application = build_application(settings, build_services(settings))
+    async def on_ready(application) -> None:
+        # Пул асинхронный, поэтому база поднимается в post_init, внутри
+        # цикла событий и до старта long polling. Ошибка базы остановит
+        # запуск: бот не должен выглядеть живым без Postgres.
+        await database.init_db(settings.database_url, settings.admin_ids)
+        if not settings.admin_ids and not await database.has_admins(
+            settings.database_url
+        ):
+            logger.warning(
+                "ADMIN_ID не задан: администратором станет первый, кто напишет /start. "
+                "Укажи ADMIN_ID в .env, чтобы закрепить админа."
+            )
+
+    async def on_shutdown(application) -> None:
+        await database.close_all()
+
+    application = build_application(
+        settings,
+        build_services(settings),
+        on_ready=on_ready,
+        on_shutdown=on_shutdown,
+    )
     logger.info("Запуск long polling")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,

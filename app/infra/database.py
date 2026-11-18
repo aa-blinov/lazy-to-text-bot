@@ -4,21 +4,24 @@
 нескольких процессах один файл становится точкой сериализации. Postgres
 даёт нормальную параллельную запись и переживает перезапуск контейнера.
 
-Схема создаётся и дополняется при старте. Соединения берутся из пула:
-запросы идут из цикла событий бота и из потоков, пул сам ждёт свободное
-соединение.
+Пул асинхронный (`psycopg_pool.AsyncConnectionPool`): обработчики бота
+живут в цикле событий, и синхронный запрос останавливал бы весь бот на
+каждый сетевой раунд. Пул открывается в `init_db` при старте и закрыт
+до неё: запрос раньше `init_db` — ошибка программирования, а не «пусть
+будет ноль». Схема создаётся и дополняется при старте, соединения
+выдаются из пула, коммит происходит на выходе из `connect`.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 
 from app.domain import Stats, User
 
@@ -53,57 +56,69 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id)",
 )
 
-_pools: dict[str, ConnectionPool] = {}
+_pools: dict[str, AsyncConnectionPool] = {}
 _pools_lock = threading.Lock()
 
 
-def pool(database_url: str) -> ConnectionPool:
-    """Пул соединений, один на строку подключения."""
-    with _pools_lock:
-        existing = _pools.get(database_url)
-        if existing is not None:
-            return existing
-        created = ConnectionPool(
-            database_url,
-            min_size=1,
-            max_size=8,
-            open=False,
-            kwargs={"row_factory": dict_row},
+def pool(database_url: str) -> AsyncConnectionPool:
+    """Пул соединений, один на строку подключения.
+
+    Пул создаётся и открывается в `init_db`. Ленивого создания нет: запрос
+    до `init_db` падает с понятной ошибкой вместо тихого соединения.
+    """
+    existing = _pools.get(database_url)
+    if existing is None:
+        raise RuntimeError(
+            f"пул соединений для {database_url!r} не открыт: сначала init_db(...)"
         )
-        created.open(wait=True, timeout=15)
-        _pools[database_url] = created
-        return created
+    return existing
 
 
-@contextmanager
-def connect(database_url: str):
+@asynccontextmanager
+async def connect(database_url: str):
     """Соединение из пула: коммит при выходе, возврат в пул всегда."""
-    with pool(database_url).connection() as conn:
+    async with pool(database_url).connection() as conn:
         yield conn
 
 
-def close_all() -> None:
+async def close_all() -> None:
     """Закрыть пулы: нужно тестам и аккуратному завершению."""
     with _pools_lock:
-        for container in _pools.values():
-            container.close()
+        pools = list(_pools.values())
         _pools.clear()
+    for container in pools:
+        await container.close()
 
 
-def init_db(database_url: str, admin_ids: tuple[int, ...] = ()) -> None:
-    """Создать схему и завести администраторов из окружения.
+async def init_db(database_url: str, admin_ids: tuple[int, ...] = ()) -> None:
+    """Создать пул, схему и завести администраторов из окружения.
 
     Ошибку не глотаем: без базы бот не должен выглядеть живым. Исключение
     останавливает процесс, и Compose перезапускает его, пока Postgres не
     поднимется.
     """
-    with connect(database_url) as conn:
-        conn.execute(USERS_SCHEMA)
-        conn.execute(TASKS_SCHEMA)
+    with _pools_lock:
+        created = _pools.get(database_url)
+        fresh = created is None
+        if fresh:
+            created = AsyncConnectionPool(
+                database_url,
+                min_size=1,
+                max_size=8,
+                open=False,
+                kwargs={"row_factory": dict_row},
+            )
+            _pools[database_url] = created
+    if fresh:
+        await created.open(wait=True, timeout=15)
+
+    async with connect(database_url) as conn:
+        await conn.execute(USERS_SCHEMA)
+        await conn.execute(TASKS_SCHEMA)
         for statement in INDEXES:
-            conn.execute(statement)
+            await conn.execute(statement)
         for admin_id in admin_ids:
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO users (user_id, is_admin) VALUES (%s, TRUE)
                    ON CONFLICT (user_id) DO UPDATE SET is_admin = TRUE""",
                 (admin_id,),
@@ -123,54 +138,57 @@ def _row_to_user(row: dict) -> User:
     )
 
 
-def get_user(database_url: str, user_id: int) -> User | None:
+async def get_user(database_url: str, user_id: int) -> User | None:
     try:
-        with connect(database_url) as conn:
-            row = conn.execute(
+        async with connect(database_url) as conn:
+            cur = await conn.execute(
                 "SELECT * FROM users WHERE user_id = %s", (user_id,)
-            ).fetchone()
+            )
+            row = await cur.fetchone()
         return _row_to_user(row) if row else None
     except psycopg.Error as exc:
         logger.error("Ошибка чтения пользователя %s: %s", user_id, exc)
         return None
 
 
-def list_users(database_url: str) -> list[User]:
+async def list_users(database_url: str) -> list[User]:
     """Все допущенные, администраторы первыми, затем по имени."""
     try:
-        with connect(database_url) as conn:
-            rows = conn.execute(
+        async with connect(database_url) as conn:
+            cur = await conn.execute(
                 """SELECT * FROM users
                    ORDER BY is_admin DESC, LOWER(first_name), user_id"""
-            ).fetchall()
+            )
+            rows = await cur.fetchall()
         return [_row_to_user(row) for row in rows]
     except psycopg.Error as exc:
         logger.error("Ошибка чтения списка пользователей: %s", exc)
         return []
 
 
-def count_users(database_url: str) -> int:
+async def count_users(database_url: str) -> int:
     try:
-        with connect(database_url) as conn:
-            return int(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
+        async with connect(database_url) as conn:
+            cur = await conn.execute("SELECT COUNT(*) AS n FROM users")
+            row = await cur.fetchone()
+        return int(row["n"])
     except psycopg.Error as exc:
         logger.error("Ошибка подсчёта пользователей: %s", exc)
         return 0
 
 
-def has_admins(database_url: str) -> bool:
+async def has_admins(database_url: str) -> bool:
     try:
-        with connect(database_url) as conn:
-            row = conn.execute(
-                "SELECT 1 AS one FROM users WHERE is_admin LIMIT 1"
-            ).fetchone()
+        async with connect(database_url) as conn:
+            cur = await conn.execute("SELECT 1 AS one FROM users WHERE is_admin LIMIT 1")
+            row = await cur.fetchone()
         return row is not None
     except psycopg.Error as exc:
         logger.error("Ошибка проверки администраторов: %s", exc)
         return False
 
 
-def add_user(
+async def add_user(
     database_url: str,
     user_id: int,
     *,
@@ -181,8 +199,8 @@ def add_user(
 ) -> bool:
     """Добавить или обновить пользователя. True, если запись новая."""
     try:
-        with connect(database_url) as conn:
-            row = conn.execute(
+        async with connect(database_url) as conn:
+            cur = await conn.execute(
                 """INSERT INTO users (user_id, is_admin, first_name, last_name, username)
                    VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT (user_id) DO UPDATE SET
@@ -192,7 +210,8 @@ def add_user(
                        is_admin = users.is_admin OR EXCLUDED.is_admin
                    RETURNING (xmax = 0) AS inserted""",
                 (user_id, is_admin, first_name or "", last_name or "", username or ""),
-            ).fetchone()
+            )
+            row = await cur.fetchone()
         created = bool(row and row["inserted"])
         logger.info("Пользователь %s %s", "добавлен" if created else "обновлён", user_id)
         return created
@@ -201,16 +220,16 @@ def add_user(
         return False
 
 
-def remove_user(database_url: str, user_id: int) -> bool:
+async def remove_user(database_url: str, user_id: int) -> bool:
     """Убрать пользователя из списка. True, если он там был.
 
     История остаётся: внешний ключ объявлен с ON DELETE SET NULL, поэтому
     запросы человека остаются в таблице без привязки к пользователю.
     """
     try:
-        with connect(database_url) as conn:
-            cursor = conn.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
-            removed = cursor.rowcount > 0
+        async with connect(database_url) as conn:
+            cur = await conn.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
+            removed = cur.rowcount > 0
         if removed:
             logger.info("Пользователь %s удалён", user_id)
         return removed
@@ -219,7 +238,7 @@ def remove_user(database_url: str, user_id: int) -> bool:
         return False
 
 
-def claim_first_admin(
+async def claim_first_admin(
     database_url: str,
     user_id: int,
     *,
@@ -234,14 +253,15 @@ def claim_first_admin(
     нет» и оба получают права.
     """
     try:
-        with connect(database_url) as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(918273645)")
-            existing = conn.execute(
+        async with connect(database_url) as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(918273645)")
+            cur = await conn.execute(
                 "SELECT 1 AS one FROM users WHERE is_admin LIMIT 1"
-            ).fetchone()
+            )
+            existing = await cur.fetchone()
             if existing is not None:
                 return False
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO users (user_id, is_admin, first_name, last_name, username)
                    VALUES (%s, TRUE, %s, %s, %s)
                    ON CONFLICT (user_id) DO UPDATE SET is_admin = TRUE""",
@@ -254,11 +274,11 @@ def claim_first_admin(
         return False
 
 
-def set_language(database_url: str, user_id: int, language: str) -> None:
+async def set_language(database_url: str, user_id: int, language: str) -> None:
     """Запомнить выбранный язык, чтобы он переживал перезапуск бота."""
     try:
-        with connect(database_url) as conn:
-            conn.execute(
+        async with connect(database_url) as conn:
+            await conn.execute(
                 "UPDATE users SET language = %s WHERE user_id = %s",
                 (language, user_id),
             )
@@ -266,7 +286,7 @@ def set_language(database_url: str, user_id: int, language: str) -> None:
         logger.error("Ошибка сохранения языка %s: %s", user_id, exc)
 
 
-def record_task(
+async def record_task(
     database_url: str,
     user_id: int,
     duration_seconds: float,
@@ -276,8 +296,8 @@ def record_task(
 ) -> None:
     """Записать запрос. Если человека уже удалили, строка остаётся без него."""
     try:
-        with connect(database_url) as conn:
-            conn.execute(
+        async with connect(database_url) as conn:
+            await conn.execute(
                 """INSERT INTO tasks
                    (user_id, timestamp, duration_seconds, original_file_type,
                     recognized_text, language)
@@ -288,8 +308,8 @@ def record_task(
         # Доступ отозвали, пока шло распознавание: историю не теряем.
         logger.info("Пользователь %s удалён, пишу запрос без владельца", user_id)
         try:
-            with connect(database_url) as conn:
-                conn.execute(
+            async with connect(database_url) as conn:
+                await conn.execute(
                     """INSERT INTO tasks
                        (user_id, timestamp, duration_seconds, original_file_type,
                         recognized_text, language)
@@ -302,8 +322,12 @@ def record_task(
         logger.error("Ошибка записи запроса пользователя %s: %s", user_id, exc)
 
 
-def stats(database_url: str) -> Stats:
-    """Счётчики для `/stats`: пользователи, запросы за сегодня и за неделю."""
+async def stats(database_url: str) -> Stats:
+    """Счётчики для `/stats`: пользователи, запросы за сегодня и за неделю.
+
+    Один запрос вместо семи: каждый раунд до базы — это пауза цикла
+    событий, субзапросы же считаются на стороне Postgres за один раунд.
+    """
     try:
         now = datetime.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -311,55 +335,41 @@ def stats(database_url: str) -> Stats:
         # окно захватывает восемь календарных дат.
         week_start = now - timedelta(days=7)
 
-        with connect(database_url) as conn:
-            total_users = int(
-                conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        async with connect(database_url) as conn:
+            cur = await conn.execute(
+                """SELECT
+                       (SELECT COUNT(*) FROM users) AS total_users,
+                       (SELECT COUNT(*) FROM users
+                          WHERE created_at >= %s) AS today_new,
+                       (SELECT COUNT(*) FROM users
+                          WHERE created_at >= %s) AS week_new,
+                       (SELECT COUNT(*) FROM tasks
+                          WHERE timestamp >= %s) AS today_requests,
+                       (SELECT COUNT(DISTINCT user_id) FROM tasks
+                          WHERE timestamp >= %s) AS today_active,
+                       (SELECT COUNT(*) FROM tasks
+                          WHERE timestamp >= %s) AS week_requests,
+                       (SELECT COUNT(DISTINCT user_id) FROM tasks
+                          WHERE timestamp >= %s) AS week_active""",
+                (
+                    today_start,
+                    week_start,
+                    today_start,
+                    today_start,
+                    week_start,
+                    week_start,
+                ),
             )
-            today_active = int(
-                conn.execute(
-                    "SELECT COUNT(DISTINCT user_id) AS n FROM tasks WHERE timestamp >= %s",
-                    (today_start,),
-                ).fetchone()["n"]
-            )
-            today_requests = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS n FROM tasks WHERE timestamp >= %s",
-                    (today_start,),
-                ).fetchone()["n"]
-            )
-            today_new = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS n FROM users WHERE created_at >= %s",
-                    (today_start,),
-                ).fetchone()["n"]
-            )
-            week_active = int(
-                conn.execute(
-                    "SELECT COUNT(DISTINCT user_id) AS n FROM tasks WHERE timestamp >= %s",
-                    (week_start,),
-                ).fetchone()["n"]
-            )
-            week_requests = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS n FROM tasks WHERE timestamp >= %s",
-                    (week_start,),
-                ).fetchone()["n"]
-            )
-            week_new = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS n FROM users WHERE created_at >= %s",
-                    (week_start,),
-                ).fetchone()["n"]
-            )
+            row = await cur.fetchone()
 
         return Stats(
-            total_users=total_users,
-            today_active=today_active,
-            today_requests=today_requests,
-            today_new=today_new,
-            week_active=week_active,
-            week_requests=week_requests,
-            week_new=week_new,
+            total_users=int(row["total_users"]),
+            today_active=int(row["today_active"]),
+            today_requests=int(row["today_requests"]),
+            today_new=int(row["today_new"]),
+            week_active=int(row["week_active"]),
+            week_requests=int(row["week_requests"]),
+            week_new=int(row["week_new"]),
         )
     except psycopg.Error as exc:
         logger.error("Ошибка чтения статистики: %s", exc)

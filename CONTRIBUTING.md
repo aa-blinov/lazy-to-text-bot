@@ -26,14 +26,14 @@ Thanks for looking at lazy-to-text-bot.
 ## Running the checks
 
 ```bash
-echo 'replace with the test command'
+python -m unittest discover -s tests -t .
+python -m compileall -q app scripts
 ```
 
-The house-style check runs in CI on every pull request. To run it locally:
-
-```bash
-python3 scripts/housecheck.py --strict .
-```
+The house-style check runs in CI on every push and pull request. The checker
+is not vendored into this repository: CI pulls it from
+`aa-blinov/golden-repo` at a pinned version, so there is no local command
+for it.
 
 ## Commit messages
 

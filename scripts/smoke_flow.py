@@ -9,6 +9,10 @@
 Запуск внутри контейнера:
     docker compose cp scripts/smoke_flow.py lazy-to-text-bot:/app/smoke_flow.py
     docker compose exec lazy-to-text-bot python smoke_flow.py
+
+Если Docker-клиент на Windows работает с демоном в WSL, exec иногда
+теряет вывод. Тогда перенаправьте его в общий том и прочитайте с хоста
+    (python smoke_flow.py > /app/data/smoke_out.txt 2>&1).
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import threading
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
@@ -172,7 +175,7 @@ async def run() -> None:
         print("они лежат в tests/fixtures и попадают в образ вместе с app/")
         raise SystemExit(2)
 
-    database.init_db(settings.database_url, settings.admin_ids)
+    await database.init_db(settings.database_url, settings.admin_ids)
     application = build_application(settings, build_services(settings))
     bot = application.bot
     update_id = 0
@@ -244,9 +247,12 @@ async def run() -> None:
         # 1. Первый /start становится админом.
         print("1. /start без ADMIN_ID")
         await process({"message": base_message(ADMIN_ID, 1, text="/start")})
-        check(database.get_user(settings.database_url, ADMIN_ID) is not None, "первый допущен")
         check(
-            bool(database.get_user(settings.database_url, ADMIN_ID).is_admin),
+            await database.get_user(settings.database_url, ADMIN_ID) is not None,
+            "первый допущен",
+        )
+        check(
+            bool((await database.get_user(settings.database_url, ADMIN_ID)).is_admin),
             "он администратор",
         )
         check(any("Привет" in text for text in texts()), "пришло приветствие")
@@ -299,7 +305,7 @@ async def run() -> None:
         check(any("Добавить этого человека" in text for text in texts()), "пришла карточка")
         await process(callback_update(ADMIN_ID, f"add:{GUEST_ID}"))
         check(
-            database.get_user(settings.database_url, GUEST_ID) is not None,
+            await database.get_user(settings.database_url, GUEST_ID) is not None,
             "пользователь в базе",
         )
         check(
@@ -321,7 +327,7 @@ async def run() -> None:
         await process(callback_update(ADMIN_ID, f"user:{GUEST_ID}:del"))
         await process(callback_update(ADMIN_ID, f"user:{GUEST_ID}:del:yes"))
         check(
-            database.get_user(settings.database_url, GUEST_ID) is None,
+            await database.get_user(settings.database_url, GUEST_ID) is None,
             "доступ убран",
         )
 
@@ -335,7 +341,7 @@ async def run() -> None:
         )
         await process(callback_update(ADMIN_ID, f"req:{NEWCOMER_ID}:allow"))
         check(
-            database.get_user(settings.database_url, NEWCOMER_ID) is not None,
+            await database.get_user(settings.database_url, NEWCOMER_ID) is not None,
             "заявка одобрена",
         )
 
@@ -376,7 +382,7 @@ async def run() -> None:
         check(any("язык" in text.lower() for text in texts()), "меню языка показано")
         await process({"message": base_message(ADMIN_ID, 31, text="🇷🇺 Русский")})
         check(
-            database.get_user(settings.database_url, ADMIN_ID).language == "ru",
+            (await database.get_user(settings.database_url, ADMIN_ID)).language == "ru",
             "язык сохранён в базе",
         )
 
@@ -387,7 +393,7 @@ async def run() -> None:
             await process({"message": base_message(ADMIN_ID, 32, text="/language")})
             await process({"message": base_message(ADMIN_ID, 33, text="🇬🇧 Английский")})
             check(
-                database.get_user(settings.database_url, ADMIN_ID).language == "en",
+                (await database.get_user(settings.database_url, ADMIN_ID)).language == "en",
                 "выбран английский",
             )
             sent.clear()
@@ -450,7 +456,7 @@ async def run() -> None:
                 check("Привет" in body, "текст распознан")
                 check("." in body and "," in body, "пунктуация на месте")
             check(
-                database.stats(settings.database_url).today_requests >= 1,
+                (await database.stats(settings.database_url)).today_requests >= 1,
                 "запрос записан в историю",
             )
         else:
@@ -593,27 +599,33 @@ async def run() -> None:
 
         # 14. Удаление человека не стирает историю.
         print("14. Удаление сохраняет историю")
-        database.record_task(
+        await database.record_task(
             settings.database_url, NEWCOMER_ID, 1.0, "voice", "история после удаления", "ru"
         )
-        with database.connect(settings.database_url) as conn:
-            before = conn.execute(
+        async with database.connect(settings.database_url) as conn:
+            cur = await conn.execute(
                 "SELECT COUNT(*) AS n FROM tasks WHERE recognized_text = %s",
                 ("история после удаления",),
-            ).fetchone()["n"]
-        removed = database.remove_user(settings.database_url, NEWCOMER_ID)
-        with database.connect(settings.database_url) as conn:
-            after = conn.execute(
+            )
+            before = (await cur.fetchone())["n"]
+        removed = await database.remove_user(settings.database_url, NEWCOMER_ID)
+        async with database.connect(settings.database_url) as conn:
+            cur = await conn.execute(
                 "SELECT COUNT(*) AS n FROM tasks WHERE recognized_text = %s",
                 ("история после удаления",),
-            ).fetchone()["n"]
-            orphan = conn.execute(
+            )
+            after = (await cur.fetchone())["n"]
+            cur = await conn.execute(
                 """SELECT COUNT(*) AS n FROM tasks
                    WHERE recognized_text = %s AND user_id IS NULL""",
                 ("история после удаления",),
-            ).fetchone()["n"]
+            )
+            orphan = (await cur.fetchone())["n"]
         check(bool(removed), "пользователь удалён")
-        check(database.get_user(settings.database_url, NEWCOMER_ID) is None, "доступа больше нет")
+        check(
+            await database.get_user(settings.database_url, NEWCOMER_ID) is None,
+            "доступа больше нет",
+        )
         check(before == after == 1 and orphan == 1, "строка истории осталась без владельца")
 
         # 15. Посторонний текст не ломает бота.
@@ -703,27 +715,25 @@ async def run() -> None:
 
         # 17. Гонка за первого администратора: ровно один.
         print("17. Гонка за первого админа")
-        with database.connect(settings.database_url) as conn:
-            conn.execute("DELETE FROM users")
-        results: list[bool] = []
-
-        def claim(user_id: int) -> None:
-            results.append(database.claim_first_admin(settings.database_url, user_id))
-
-        threads = [
-            threading.Thread(target=claim, args=(user_id,)) for user_id in (501, 502)
+        async with database.connect(settings.database_url) as conn:
+            await conn.execute("DELETE FROM users")
+        # Два одновременных претендента: advisory-блокировка в базе должна
+        # отдать права ровно одному.
+        results = await asyncio.gather(
+            database.claim_first_admin(settings.database_url, 501),
+            database.claim_first_admin(settings.database_url, 502),
+        )
+        admins = [
+            user
+            for user in await database.list_users(settings.database_url)
+            if user.is_admin
         ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        admins = [user for user in database.list_users(settings.database_url) if user.is_admin]
         check(sum(1 for value in results if value) == 1, "права получил ровно один")
         check(len(admins) == 1, "админ в базе один")
     finally:
         await application.shutdown()
         stack.close()
-        database.close_all()
+        await database.close_all()
 
     print()
     if failures:

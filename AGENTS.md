@@ -16,12 +16,17 @@ docker compose down                        # stop the four services
 pip install --no-cache-dir -r requirements.txt
 python -m app.main                         # the bot, without Docker
 python -m app.worker.consumer              # the worker, without Docker
+python -m unittest discover -s tests -t .  # unit tests, no containers needed
 ```
 
-The repository has no test command. `tests/test_bot.py` is empty, and no test
-runner is in `requirements.txt`, so a change is checked by running the bot
-against a real token. `python -m compileall app` is a syntax check the
-standard library provides; it is not a project script.
+Unit tests of the pure functions run with the standard library:
+`python -m unittest discover -s tests -t .`. They cover `split_escaped`,
+`transcript_blocks`, the ASR cut point and the log scrubbing, and they need
+no database, no network and no test runner in `requirements.txt`. The
+handlers, the base and the worker are checked end to end by
+`scripts/smoke_flow.py` against the real containers. `python -m
+compileall app` is a syntax check the standard library provides; it is not
+a project script.
 
 Two things a run outside Compose needs. `app/infra/queue.py` reads
 `REDIS_HOST` (default `redis`) and `REDIS_PORT` (default `6379`), and that
@@ -57,7 +62,9 @@ read over HTTPS.
 | `app/worker/consumer.py` | The worker entry point: logging, warm-up, Huey consumer. |
 | `docs/` | The project page (`index.html`, `style.css`, `site.js`, fonts, `screenshots/`) and `architecture.md`. |
 | `.github/workflows/pages.yml` | Deploys `docs/` to GitHub Pages on a push to `master`. |
-| `tests/test_bot.py` | Empty. |
+| `tests/test_formatting.py` | Unit tests: escaping, chunk splitting, `<pre>` blocks. |
+| `tests/test_asr_helpers.py` | Unit tests: the cut point, resampling, log scrubbing. |
+| `tests/test_bot.py` | Empty placeholder. |
 | `scripts/smoke_flow.py` | End-to-end handler and worker check against a throwaway database. |
 | `tests/fixtures/` | Russian, English and video samples plus a 58-second clip; baked into the image. |
 | `scripts/load_check.py` | Concurrent clients against the real queue: latency, loop lag, Redis keys. |
@@ -135,11 +142,18 @@ read over HTTPS.
   turns those variables into Huey's `-w` and `-k` flags, because Huey reads
   the command line, not the environment. With threads the second worker does
   not load another 700 MB of weights; with `process` it does.
-- **The database is Postgres with a pool.** `app/infra/database.py` keeps one
-  `ConnectionPool` per `DATABASE_URL` (1 to 8 connections) and hands out a
-  connection per call; `with connect(...)` commits. The pool exists because
-  the handler writes the history from the event loop and the queries must not
-  serialise on one socket.
+- **The database is Postgres with an async pool.** `app/infra/database.py`
+  keeps one `AsyncConnectionPool` per `DATABASE_URL` (1 to 8 connections);
+  `async with connect(...)` commits, and every service call is awaited by
+  the handler, so a Postgres round-trip never stops the event loop. The
+  pool is opened by `init_db` (called from `post_init`, before long
+  polling) and closed in `post_shutdown`; a call before `init_db` raises
+  instead of opening quietly.
+- **The hot path reads the user row once.** `handle_media` and `/start`
+  fetch the row with `get()`, take the language and the admin flag from it
+  (`is_admin_row`) and let `ensure_profile` write only when the profile
+  actually changed. A second fetch per message or an unconditional UPSERT
+  is a regression: four blocking queries used to sit on the event loop.
 - **Removing a person keeps their history.** `tasks.user_id` is
   `ON DELETE SET NULL`, so the row stays without an owner and the counters in
   `/stats` do not lose past requests. Deleting the tasks instead would be a
@@ -178,11 +192,13 @@ read over HTTPS.
   wraps every command, callback and conversation step with `_private_only`:
   in a group `/admin` would otherwise post the whole allowlist with numeric
   IDs. A new admin handler has to go through `_guard` too.
-- **Startup is strict on purpose.** `database.init_db` lets a connection
-  error propagate and `consumer.py` exits when `warm_up` returns False, so
-  Compose restarts the container instead of showing healthy. Both entry
-  points delete the ready file at start, because `docker compose restart`
-  keeps `/tmp` and a stale file would mark a broken process healthy.
+- **Startup is strict on purpose.** `database.init_db` runs in `post_init`,
+  inside the event loop an async pool needs, and lets a connection error
+  propagate: the run stops before long polling starts, and Compose restarts
+  the container instead of showing healthy. `consumer.py` exits when
+  `warm_up` returns False for the same reason. Both entry points delete the
+  ready file at start, because `docker compose restart` keeps `/tmp` and a
+  stale file would mark a broken process healthy.
 - **The Telegram URL sits in Redis.** The token is in the task payload and
   therefore in the AOF, but Redis is not published, and the same token is
   already in the container environment. Rotating the token invalidates both

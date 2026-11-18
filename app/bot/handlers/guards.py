@@ -12,14 +12,14 @@ from app.bot import deps, texts
 logger = logging.getLogger(__name__)
 
 
-def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
-    return deps.access(context).is_admin(user.id if user else None)
+    return await deps.access(context).is_admin(user.id if user else None)
 
 
-def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """True, если это не админ и обработчик должен остановиться."""
-    return not is_admin(update, context)
+    return not await is_admin(update, context)
 
 
 async def answer(query, text: str | None = None, alert: bool = False) -> None:

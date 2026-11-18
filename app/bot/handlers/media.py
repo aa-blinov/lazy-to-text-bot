@@ -18,7 +18,6 @@ from telegram.ext import ContextTypes
 from app.bot import deps, keyboards, texts
 from app.bot.formatting import transcript_blocks
 from app.bot.handlers.common import deny_access, ensure_profile
-from app.bot.handlers.guards import is_admin
 from app.services.transcription import TranscriptionTimeout, TranscriptTooLong
 
 logger = logging.getLogger(__name__)
@@ -111,7 +110,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None or user is None:
         return
 
-    if not deps.access(context).is_allowed(user.id):
+    stored = await deps.access(context).get(user.id)
+    if stored is None:
         await deny_access(update, context)
         return
 
@@ -160,8 +160,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    await ensure_profile(update, context)
-    language = deps.access(context).language(user.id)
+    await ensure_profile(update, context, stored)
+    # Строка уже прочитана: язык берём из неё, без второго запроса.
+    language = stored.language
     status = await message.reply_text(texts.DOWNLOADS)
 
     # Прогресс живёт в Redis: воркер пишет туда, сколько уже распознал,
@@ -220,8 +221,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as exc:  # сообщение могли удалить вручную
             logger.debug("Не удалось убрать статус: %s", exc)
 
-        await send_transcript(message, transcript.text, is_admin(update, context))
-        deps.stats(context).record(
+        await send_transcript(
+            message,
+            transcript.text,
+            deps.access(context).is_admin_row(user.id, stored),
+        )
+        await deps.stats(context).record(
             user.id, elapsed, file_type, transcript.text, transcript.language
         )
         logger.info(

@@ -34,21 +34,21 @@ WAITING_USER = 1
 USERNAME_RE = re.compile(r"^(?:@|https?://t\.me/)([A-Za-z0-9_]{4,32})/?$")
 
 
-def menu_for(context: ContextTypes.DEFAULT_TYPE, user_id: int | None):
-    return keyboards.main_menu(deps.access(context).is_admin(user_id))
+async def menu_for(context: ContextTypes.DEFAULT_TYPE, user_id: int | None):
+    return keyboards.main_menu(await deps.access(context).is_admin(user_id))
 
 
 # --- панель и список ------------------------------------------------------
 
 
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return
 
     access = deps.access(context)
     user = update.effective_user
-    total = access.count()
+    total = await access.count()
 
     if update.callback_query:
         await answer(update.callback_query)
@@ -66,7 +66,8 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # делается inline-кнопками, чтобы не дублировать меню.
     if not context.user_data.get("admin_menu_sent"):
         await message.reply_text(
-            texts.MENU_READY, reply_markup=menu_for(context, user.id if user else None)
+            texts.MENU_READY,
+            reply_markup=await menu_for(context, user.id if user else None),
         )
         context.user_data["admin_menu_sent"] = True
     await message.reply_text(
@@ -77,11 +78,11 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def show_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return
 
-    users = deps.access(context).all()
+    users = await deps.access(context).all()
     text = texts.users_list(users) if users else texts.USERS_EMPTY
     markup = keyboards.users_list(users) if users else keyboards.back_home()
 
@@ -100,12 +101,12 @@ async def user_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
-    if deny(update, context):
+    if await deny(update, context):
         await answer(query, texts.CALLBACK_NOT_ADMIN, alert=True)
         return
 
     user_id = int(query.data.split(":")[1])
-    user = deps.access(context).get(user_id)
+    user = await deps.access(context).get(user_id)
     if user is None:
         await answer(query, texts.ALERT_NO_USER_LIST, alert=True)
         await show_users(update, context)
@@ -125,13 +126,13 @@ async def user_confirm_remove(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     if not query:
         return
-    if deny(update, context):
+    if await deny(update, context):
         await answer(query, texts.CALLBACK_NOT_ADMIN, alert=True)
         return
 
     user_id = int(query.data.split(":")[1])
     access = deps.access(context)
-    user = access.get(user_id)
+    user = await access.get(user_id)
     if user is None:
         await answer(query, texts.ALERT_NO_USER, alert=True)
         return
@@ -151,14 +152,14 @@ async def user_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     if not query:
         return
-    if deny(update, context):
+    if await deny(update, context):
         await answer(query, texts.CALLBACK_NOT_ADMIN, alert=True)
         return
 
     user_id = int(query.data.split(":")[1])
     access = deps.access(context)
-    user = access.get(user_id) or User(user_id=user_id)
-    removed = access.revoke(user_id)
+    user = await access.get(user_id) or User(user_id=user_id)
+    removed = await access.revoke(user_id)
     await answer(query, texts.ALERT_REVOKED if removed else texts.ALERT_NOTHING_TO_REVOKE)
 
     try:
@@ -166,7 +167,7 @@ async def user_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         logger.info("Не удалось уведомить %s о закрытии доступа: %s", user_id, exc)
 
-    users = access.all()
+    users = await access.all()
     await query.edit_message_text(
         texts.users_list(users) if users else texts.USERS_EMPTY,
         parse_mode=ParseMode.HTML,
@@ -180,7 +181,7 @@ async def user_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало добавления: просим номер, @username или пересланное сообщение."""
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return ConversationHandler.END
 
@@ -257,7 +258,7 @@ async def add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     message = update.effective_message
     if not message:
         return WAITING_USER
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return ConversationHandler.END
 
@@ -265,7 +266,7 @@ async def add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if text in (keyboards.BTN_CANCEL, "/cancel"):
         await message.reply_text(
             texts.ADD_CANCELLED,
-            reply_markup=menu_for(context, update.effective_user.id),
+            reply_markup=await menu_for(context, update.effective_user.id),
         )
         return ConversationHandler.END
 
@@ -275,12 +276,12 @@ async def add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return WAITING_USER
 
     user_id = candidate["user_id"]
-    existing = deps.access(context).get(user_id)
+    existing = await deps.access(context).get(user_id)
     if existing is not None:
         await message.reply_text(
             texts.add_already(existing.display_name),
             parse_mode=ParseMode.HTML,
-            reply_markup=menu_for(context, update.effective_user.id),
+            reply_markup=await menu_for(context, update.effective_user.id),
         )
         return ConversationHandler.END
 
@@ -304,7 +305,7 @@ async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     if not query:
         return
-    if deny(update, context):
+    if await deny(update, context):
         await answer(query, texts.CALLBACK_NOT_ADMIN, alert=True)
         return
 
@@ -312,7 +313,7 @@ async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     access = deps.access(context)
     pending = context.user_data.pop("pending_user", None) or {}
     if pending.get("user_id") != user_id:
-        current = access.get(user_id)
+        current = await access.get(user_id)
         pending = (
             {
                 "first_name": current.first_name,
@@ -323,13 +324,13 @@ async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             else {}
         )
 
-    access.grant(
+    await access.grant(
         user_id,
         first_name=pending.get("first_name", ""),
         last_name=pending.get("last_name", ""),
         username=pending.get("username", ""),
     )
-    user = access.get(user_id) or User(user_id=user_id)
+    user = (await access.get(user_id)) or User(user_id=user_id)
     name = user.display_name
 
     await answer(query, texts.ALERT_GRANTED)
@@ -355,7 +356,7 @@ async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ссылка на бота, которую админ пересылает сам."""
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return
     username = context.bot.username
@@ -374,12 +375,12 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if deny(update, context):
+    if await deny(update, context):
         await say_not_admin(update)
         return
     settings = deps.settings(context)
     text = texts.stats(
-        deps.stats(context).overview(),
+        await deps.stats(context).overview(),
         datetime.now().strftime("%d.%m.%Y"),
         settings.asr_model,
         settings.asr_quantization or "fp32",
@@ -397,7 +398,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_message:
         await update.effective_message.reply_text(
             texts.ADD_CANCELLED,
-            reply_markup=menu_for(
+            reply_markup=await menu_for(
                 context, update.effective_user.id if update.effective_user else None
             ),
         )

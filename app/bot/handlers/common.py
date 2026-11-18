@@ -11,21 +11,31 @@ from telegram.ext import ContextTypes
 from app.bot import deps, keyboards, texts
 from app.bot.handlers.guards import is_admin
 from app.bot.handlers.requests import notify_access_request
+from app.domain import User
 
 logger = logging.getLogger(__name__)
 
 
-async def ensure_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обновить имя и username, если человек их сменил в Telegram."""
+async def ensure_profile(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, stored: User | None
+) -> None:
+    """Обновить имя и username, если человек их сменил в Telegram.
+
+    Строка пользователя уже прочитана ради проверки доступа, поэтому
+    лишний раз к базе не ходим: пишем только когда профиль сменился,
+    а не на каждое сообщение.
+    """
     user = update.effective_user
     if user is None:
         return
-    deps.access(context).register(
-        user.id,
-        first_name=user.first_name or "",
-        last_name=user.last_name or "",
-        username=user.username or "",
-    )
+    fresh = (user.first_name or "", user.last_name or "", user.username or "")
+    if stored is not None and (
+        stored.first_name,
+        stored.last_name,
+        stored.username,
+    ) == fresh:
+        return
+    await deps.access(context).register(user.id, *fresh)
 
 
 async def deny_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -36,8 +46,8 @@ async def deny_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     service = deps.access(context)
-    if not service.has_admin():
-        claimed = service.claim_first_admin(
+    if not await service.has_admin():
+        claimed = await service.claim_first_admin(
             user.id,
             first_name=user.first_name or "",
             last_name=user.last_name or "",
@@ -62,12 +72,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None or message is None:
         return
 
-    if not deps.access(context).is_allowed(user.id):
+    stored = await deps.access(context).get(user.id)
+    if stored is None:
         await deny_access(update, context)
         return
 
-    await ensure_profile(update, context)
-    admin = is_admin(update, context)
+    await ensure_profile(update, context, stored)
+    admin = deps.access(context).is_admin_row(user.id, stored)
     await message.reply_text(
         texts.start(user.first_name or "друг", admin),
         reply_markup=keyboards.main_menu(admin),
@@ -79,7 +90,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     await message.reply_text(
-        texts.help_text(is_admin(update, context)), parse_mode=ParseMode.HTML
+        texts.help_text(await is_admin(update, context)), parse_mode=ParseMode.HTML
     )
 
 
@@ -88,7 +99,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     await message.reply_text(
-        texts.CANCELLED, reply_markup=keyboards.main_menu(is_admin(update, context))
+        texts.CANCELLED, reply_markup=keyboards.main_menu(await is_admin(update, context))
     )
 
 
@@ -98,7 +109,7 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     await message.reply_text(
-        texts.FALLBACK, reply_markup=keyboards.main_menu(is_admin(update, context))
+        texts.FALLBACK, reply_markup=keyboards.main_menu(await is_admin(update, context))
     )
 
 

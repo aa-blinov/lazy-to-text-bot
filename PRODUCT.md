@@ -120,9 +120,9 @@ Deliberately not true, and worth knowing before a change:
   the recording.
 - Removing a person keeps their request rows: the foreign key is
   `ON DELETE SET NULL`, so the history survives without an owner.
-- The repository has CI and a project page, but no working unit test suite:
-  `tests/test_bot.py` is empty, and the end-to-end check is a script that
-  needs the stack running.
+- The unit tests cover the pure helpers only: the escaping, the chunk
+  splitting, the ASR cut point. The handlers, the database and the worker
+  are still checked by a script that needs the stack running.
 
 ## Brand Commitments
 

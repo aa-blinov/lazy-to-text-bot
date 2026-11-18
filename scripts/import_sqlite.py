@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sqlite3
 import sys
@@ -26,26 +27,22 @@ def parse_time(value: str | None) -> datetime | None:
         return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sqlite", default="data/bot_database.db")
-    args = parser.parse_args()
-
-    if not os.path.exists(args.sqlite):
-        print(f"нет файла {args.sqlite}: переносить нечего")
+async def run(sqlite_path: str) -> int:
+    if not os.path.exists(sqlite_path):
+        print(f"нет файла {sqlite_path}: переносить нечего")
         return 0
 
     settings = Settings.from_env()
-    database.init_db(settings.database_url, settings.admin_ids)
+    await database.init_db(settings.database_url, settings.admin_ids)
 
-    source = sqlite3.connect(args.sqlite)
+    source = sqlite3.connect(sqlite_path)
     source.row_factory = sqlite3.Row
     users = source.execute("SELECT * FROM users").fetchall()
     tasks = source.execute("SELECT * FROM tasks").fetchall()
 
     imported_users = 0
     for row in users:
-        database.add_user(
+        await database.add_user(
             settings.database_url,
             int(row["user_id"]),
             is_admin=bool(row["is_admin"]),
@@ -56,16 +53,17 @@ def main() -> int:
         imported_users += 1
 
     imported_tasks = 0
-    with database.connect(settings.database_url) as conn:
+    async with database.connect(settings.database_url) as conn:
         for row in tasks:
             user_id = row["user_id"]
             if user_id is not None:
-                exists = conn.execute(
-                    "SELECT 1 FROM users WHERE user_id = %s", (int(user_id),)
-                ).fetchone()
+                cur = await conn.execute(
+                    "SELECT 1 AS one FROM users WHERE user_id = %s", (int(user_id),)
+                )
+                exists = await cur.fetchone()
                 if not exists:
                     user_id = None
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO tasks
                    (user_id, timestamp, duration_seconds, original_file_type,
                     recognized_text, language)
@@ -82,9 +80,16 @@ def main() -> int:
             imported_tasks += 1
 
     source.close()
-    database.close_all()
+    await database.close_all()
     print(f"перенесено: пользователей {imported_users}, запросов {imported_tasks}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sqlite", default="data/bot_database.db")
+    args = parser.parse_args()
+    return asyncio.run(run(args.sqlite))
 
 
 if __name__ == "__main__":

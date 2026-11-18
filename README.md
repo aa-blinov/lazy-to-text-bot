@@ -168,15 +168,15 @@ Measured on two worker threads, with the stack under load:
 | 10 clients, 58 s audio each | 20 s | 20 s |
 
 A burst queues up instead of failing; the bot waits at least 120 seconds and
-at most 900, depending on the duration the message reports. A
+at most 3600, depending on the duration the message reports. A
 one-minute message takes 2.6 to 5 seconds of worker time depending on what
 else runs on the host. To serve more at once, raise `HUEY_WORKER_COUNT`:
 threads share the loaded models, process workers take about 700 MB each.
 
 The Telegram side does not block: downloads happen inside the worker, and the
-burst above held the bot event loop to about 40 ms of lag, all of it Postgres
-writes. Postgres takes them without a lock and the pool is shared by the
-process.
+database is reached through the async pool, so a Postgres write waits its turn
+instead of pausing the event loop. Earlier, with a synchronous pool, the same
+burst held the loop for about 40 ms of database writes.
 
 ## Server sizing
 
@@ -306,13 +306,15 @@ root (or from `/app` inside the container). `app/infra/queue.py` connects to
 `REDIS_HOST` (default `redis`), so a run outside Compose needs that name to
 resolve or an override in the environment. ffmpeg has to be on the path.
 
-The repository has no test command. `tests/test_bot.py` is empty, and no test
-runner is in `requirements.txt`. `scripts/smoke_flow.py` is the end-to-end
-check that is actually run: it feeds real updates through the application
-with the Telegram calls mocked and a real worker behind the queue, then
-leaves a throwaway `lazy_smoke` database behind. The audio samples live in
-`tests/fixtures/` and are part of the image, so a missing fixture fails the
-run instead of silently skipping the worker.
+Unit tests of the pure helpers run with the standard library:
+`python -m unittest discover -s tests -t .`. They check the message
+splitting, the HTML escaping and the ASR cut point, and they need no database
+and no network. `scripts/smoke_flow.py` is the end-to-end check that is
+actually run: it feeds real updates through the application with the Telegram
+calls mocked and a real worker behind the queue, then leaves a throwaway
+`lazy_smoke` database behind. The audio samples live in `tests/fixtures/` and
+are part of the image, so a missing fixture fails the run instead of silently
+skipping the worker.
 
 | Path | What it holds |
 | --- | --- |
@@ -329,6 +331,8 @@ run instead of silently skipping the worker.
 | `Dockerfile` | Two stages on `python:3.12-slim`, with ffmpeg, libsndfile1 and libgomp1. |
 | `docker-compose.yml` | The four services and the shared `./data` volume. |
 | `scripts/smoke_flow.py` | The end-to-end check against a throwaway Postgres database. |
+| `tests/test_formatting.py` | Unit tests: the escaping and the chunk splitting. |
+| `tests/test_asr_helpers.py` | Unit tests: the cut point, resampling, log scrubbing. |
 | `tests/fixtures/` | Short Russian, English and video samples plus a 58-second clip for the checks. |
 | `scripts/import_sqlite.py` | One-time move of an older SQLite history into Postgres. |
 | `.env.example` | The variables and their defaults. |

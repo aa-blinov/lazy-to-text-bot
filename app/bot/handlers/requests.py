@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 async def notify_admins(
     context: ContextTypes.DEFAULT_TYPE, text: str, markup=None
 ) -> None:
-    for admin_id in deps.access(context).admins():
+    for admin_id in await deps.access(context).admins():
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
@@ -47,7 +47,7 @@ async def access_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if not query:
         return
-    if not is_admin(update, context):
+    if not await is_admin(update, context):
         await answer(query, texts.CALLBACK_NOT_ADMIN, alert=True)
         return
 
@@ -87,6 +87,6 @@ async def _allow(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
         username = chat.username or ""
     except Exception:
         pass
-    deps.access(context).grant(
+    await deps.access(context).grant(
         user_id, first_name=first_name, last_name=last_name, username=username
     )

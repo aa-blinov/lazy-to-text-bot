@@ -14,7 +14,7 @@ async def language_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message = update.effective_message
     if user is None or message is None:
         return
-    current = deps.access(context).language(user.id)
+    current = await deps.access(context).language(user.id)
     await message.reply_text(
         texts.LANGUAGE_MENU, reply_markup=keyboards.language_menu(current)
     )
@@ -41,9 +41,9 @@ async def language_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await language_menu(update, context)
         return
 
-    deps.access(context).set_language(user.id, language)
+    await deps.access(context).set_language(user.id, language)
     note = texts.LANGUAGE_EN_NOTE if language == "en" else ""
     await message.reply_text(
         texts.language_set(keyboards.LANGUAGE_NAMES[language], note),
-        reply_markup=keyboards.main_menu(is_admin(update, context)),
+        reply_markup=keyboards.main_menu(await is_admin(update, context)),
     )

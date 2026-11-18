@@ -10,10 +10,10 @@ class StatsService:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
 
-    def overview(self) -> Stats:
-        return database.stats(self.database_url)
+    async def overview(self) -> Stats:
+        return await database.stats(self.database_url)
 
-    def record(
+    async def record(
         self,
         user_id: int,
         duration_seconds: float,
@@ -21,6 +21,6 @@ class StatsService:
         text: str,
         language: str | None = None,
     ) -> None:
-        database.record_task(
+        await database.record_task(
             self.database_url, user_id, duration_seconds, file_type, text, language
         )

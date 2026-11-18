@@ -22,8 +22,8 @@ infra/     Postgres, ONNX, Huey                          (depends on config, dom
 domain.py  User, Stats, Transcript                       (depends on nothing)
 ```
 
-`app/main.py` is the composition root: it reads `Settings`, creates the
-schema, builds the `Application` and starts polling.
+`app/main.py` is the composition root: it reads `Settings`, passes the
+schema-creation hook to the `Application` and starts polling.
 `app/worker/consumer.py` is the second process: it warms the model and hands
 the task module to Huey.
 
@@ -62,9 +62,9 @@ and enqueues it; the worker's ffmpeg pulls the stream from Telegram. The URL
 carries the bot token, so it is never logged.
 
 The bot waits for the result with `aget_result` and edits one status message
-while it waits; the wait is capped by `asyncio.wait_for`, 120 seconds at the
-floor and 900 at the ceiling, because the first message after a fresh deploy
-can arrive while the worker is still warming the models.
+while it waits; the wait is capped by a timeout on `asyncio.wait`, 120 seconds
+at the floor and 3600 at the ceiling, because the first message after a fresh
+deploy can arrive while the worker is still warming the models.
 
 The history is written after the reply is sent, one row per finished
 transcription: the timestamp, the wall-clock duration, the kind of media, the
@@ -114,9 +114,10 @@ of both models.
 
 The history is a small table, but two worker threads and the bot can write at
 once, and SQLite would serialise them behind one file lock on the bind mount.
-Postgres takes parallel writes; the bot uses a `psycopg_pool` connection pool
-of 1 to 8 connections. Removing a person keeps their rows: the foreign key is
-`ON DELETE SET NULL`.
+Postgres takes parallel writes; the bot uses a
+`psycopg_pool.AsyncConnectionPool` of 1 to 8 connections, and every query is
+awaited, so the event loop never pauses on the database. Removing a person
+keeps their rows: the foreign key is `ON DELETE SET NULL`.
 
 ### The model stays on the CPU, and it is small
 

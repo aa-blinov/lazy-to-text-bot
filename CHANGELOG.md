@@ -70,6 +70,25 @@ All notable changes to lazy-to-text-bot. Versions are ordered newest first.
 
 ### Changed
 
+- **The database access is async end to end.** psycopg's `AsyncConnectionPool`
+  replaces the sync pool: every service method is awaited by the handlers, so
+  a Postgres round-trip never stops the event loop. A media message used to
+  make four blocking queries (`is_allowed`, `register`, `language`, `record`);
+  now it reads the user row once, takes the language and the admin flag from
+  it (`is_admin_row`), writes the profile only when it actually changed and
+  finishes with the history insert. `/stats` counts everything in one query
+  with scalar subqueries instead of seven round-trips. Startup moved into
+  `post_init`, because an async pool needs the running loop: a dead Postgres
+  still stops the bot before polling starts, and the pool closes in
+  `post_shutdown`. `scripts/smoke_flow.py` runs the first-admin race with
+  `asyncio.gather` instead of threads.
+- **The pure functions have unit tests.**
+  `python -m unittest discover -s tests -t .` checks `split_escaped`,
+  `transcript_blocks`, the ASR cut point and the log scrubbing without a
+  database, a network or a new dependency: the runner is the standard
+  library. The handlers, the base and the worker are still checked end to
+  end by `scripts/smoke_flow.py` against the real containers.
+
 - **The transcript arrives as a code block.** A message with a `<pre>` block
   has a copy button in every Telegram client, and a transcript is almost
   always copied. The text stays escaped, long answers are still split, and

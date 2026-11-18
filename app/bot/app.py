@@ -140,26 +140,55 @@ async def _update_profile(bot) -> None:
         logger.warning("Не удалось обновить аватар бота: %s", exc)
 
 
-async def post_init(application) -> None:
-    """Профиль бота в Telegram: команды, имя, описание, аватар."""
-    await _update_profile(application.bot)
-    # Файл готовности читает healthcheck в compose: он появляется, когда
-    # приложение собрано и профиль обновлён, до старта long polling.
-    try:
-        Path(READY_FILE).write_text("ready\n", encoding="utf-8")
-    except OSError as exc:
-        logger.debug("Не удалось записать %s: %s", READY_FILE, exc)
-    logger.info("Бот запущен: @%s", application.bot.username)
+def _make_post_init(on_ready):
+    async def post_init(application) -> None:
+        """База и профиль бота в Telegram: команды, имя, описание, аватар."""
+        if on_ready is not None:
+            # Строго: без базы бот не должен браться даже за профиль.
+            # Исключение из on_ready остановит запуск, и Compose
+            # перезапустит контейнер, пока Postgres не поднимется.
+            await on_ready(application)
+        await _update_profile(application.bot)
+        # Файл готовности читает healthcheck в compose: он появляется, когда
+        # приложение собрано и профиль обновлён, до старта long polling.
+        try:
+            Path(READY_FILE).write_text("ready\n", encoding="utf-8")
+        except OSError as exc:
+            logger.debug("Не удалось записать %s: %s", READY_FILE, exc)
+        logger.info("Бот запущен: @%s", application.bot.username)
+
+    return post_init
 
 
-def build_application(settings: Settings, services: Services):
-    """Собрать приложение и положить сервисы в `bot_data`."""
+def _make_post_shutdown(on_shutdown):
+    async def post_shutdown(application) -> None:
+        if on_shutdown is None:
+            return
+        try:
+            await on_shutdown(application)
+        except Exception:
+            # Завершение не должно падать: соединения закроет и процесс.
+            logger.debug("Не удалось закрыть ресурсы при остановке", exc_info=True)
+
+    return post_shutdown
+
+
+def build_application(
+    settings: Settings, services: Services, on_ready=None, on_shutdown=None
+):
+    """Собрать приложение и положить сервисы в `bot_data`.
+
+    `on_ready` выполняется в post_init до старта long polling: так бот
+    поднимает базу. Исключение из него останавливает запуск, и healthcheck
+    показывает unhealthy вместо «живого» бота без Postgres.
+    """
     builder = (
         ApplicationBuilder()
         .token(settings.token)
         .defaults(Defaults(parse_mode=ParseMode.HTML))
         .concurrent_updates(4)
-        .post_init(post_init)
+        .post_init(_make_post_init(on_ready))
+        .post_shutdown(_make_post_shutdown(on_shutdown))
     )
     if settings.telegram_api_base:
         # Локальный сервер Bot API: снимает лимит 20 МБ и отдаёт файлы

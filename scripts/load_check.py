@@ -31,10 +31,11 @@ async def main() -> None:
     # иначе Postgres отвергает каждую вставку и засоряет лог.
     from app.infra import database
 
-    known = database.list_users(settings.database_url)
+    await database.init_db(settings.database_url, settings.admin_ids)
+    known = await database.list_users(settings.database_url)
     user_id = known[0].user_id if known else 111
     if not known:
-        database.add_user(settings.database_url, user_id, first_name="Load check")
+        await database.add_user(settings.database_url, user_id, first_name="Load check")
 
     files = []
     for index in range(args.clients):
@@ -49,7 +50,9 @@ async def main() -> None:
         )
         elapsed = time.time() - started
         if transcript:
-            services.stats.record(user_id, elapsed, "voice", transcript.text, "ru")
+            await services.stats.record(
+                user_id, elapsed, "voice", transcript.text, "ru"
+            )
         return elapsed, transcript is not None
 
     client = redis.Redis(
@@ -80,6 +83,7 @@ async def main() -> None:
     print("ok:", sum(1 for item in results if item[1]), "/", len(results))
     print(f"event loop max lag: {max(lags) * 1000:.1f} ms")
     print(f"redis huey keys: {before} -> {len(keys)}")
+    await database.close_all()
 
 
 if __name__ == "__main__":

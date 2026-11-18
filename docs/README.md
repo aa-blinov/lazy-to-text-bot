@@ -40,7 +40,7 @@ in both the code and the document.
 ## What is not here
 
 There is no guide for the deployment beyond the `docker-compose.yml` in the
-root, and there is no test guide: the repository has no test command and
-`tests/test_bot.py` is empty. The smoke check in
-[../scripts/smoke_flow.py](../scripts/smoke_flow.py) is the one automated run
-that exists, and it needs the stack up.
+root. The pure helpers are covered by unit tests run with
+`python -m unittest discover -s tests -t .`; the end-to-end check is
+[../scripts/smoke_flow.py](../scripts/smoke_flow.py), and it needs the
+stack up.
